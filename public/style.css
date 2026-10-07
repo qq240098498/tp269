@@ -297,6 +297,27 @@ tr.expand-row > td {
 .num-danger { color: var(--danger); font-weight: 600; }
 .num-warn { color: var(--accent); }
 
+/* 补录数据与自动数据区分：补录行带浅橙底色 */
+tbody tr.row-imputed > td { background: #fdf6ea; }
+tbody tr.row.row-imputed:hover > td { background: var(--accent-soft); }
+tbody tr.row.row-imputed.is-open > td { background: var(--accent-soft); }
+
+/* 逐日明细：不计入原因列允许换行 */
+td.reason-cell { white-space: normal; min-width: 220px; color: var(--danger); }
+.invalid-note { color: var(--danger); }
+
+/* 汇总卡下的补录超限警示 */
+.impute-warning {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid #e8c2bd;
+  border-left: 4px solid var(--danger);
+  border-radius: 4px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 12px;
+}
+
 /* ---------- 弹层 ---------- */
 .modal-mask {
   display: flex;

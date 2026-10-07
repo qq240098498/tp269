@@ -748,14 +748,14 @@
         return api('DELETE', '/api/readings/' + r.id).then(function () { return afterMutation('已删除监测数据 ' + r.id); });
       })
     ]);
-    return expandableRow([
+    var tr = expandableRow([
       h('td', { text: textOf(r.outletCode) }),
       h('td', { text: textOf(r.deviceCode) }),
       h('td', { text: r.metric }),
       h('td', { class: 'nowrap', text: r.at }),
       h('td', { class: 'mono', text: textOf(r.value) }),
       h('td', {}, h('span', { class: 'tag ' + (r.flag === '有效' ? 'tag-ok' : 'tag-danger'), text: r.flag })),
-      h('td', { text: r.source }),
+      h('td', {}, sourceTag(r.source)),
       h('td', { text: textOf(r.operator) }),
       h('td', {}, h('span', { class: 'tag ' + (r.counted ? 'tag-ok' : 'tag-danger'), text: r.counted ? '计入' : '不计入' })),
       h('td', { class: 'mono cell-page-conc', dataset: { value: pc === null ? '' : String(pc) }, text: pc === null ? '—' : fmt(pc, 2) }),
@@ -770,6 +770,8 @@
         h('div', { class: 'detail-block' }, [h('h3', { text: '备注' }), h('div', { text: textOf(r.remark) })])
       ]);
     });
+    if (r.source === '补录') tr.classList.add('row-imputed');
+    return tr;
   }
 
   async function renderReadings() {
@@ -892,9 +894,12 @@
   function summaryCard(sum, metric) {
     var row = metricOf(sum.rows, metric);
     var st = sum.settings || {};
+    var imputeDays = row.imputeExceededDays || [];
     var cells = [
       ['月均', fmt(row.monthAverage)],
       ['月总量(吨)', fmt(row.monthTotalTons, 4)],
+      ['有效天数', textOf(row.validDayCount)],
+      ['补录超限日', imputeDays.length ? imputeDays.map(function (d) { return d.day.slice(5); }).join('、') : '无'],
       ['季度总量 COD(吨)', fmt(sum.quarterTotalCod, 4)],
       ['季度许可量 COD(吨)', fmt(sum.permitCodTons, 4)],
       ['年累计 COD(吨)', fmt(sum.accumulatedCodTons, 4)],
@@ -910,22 +915,30 @@
     cells.forEach(function (p) {
       var cls = '';
       if (p[0] === '超标判定') cls = p[1] === '超标' ? ' num-danger' : ' num-ok';
+      if (p[0] === '补录超限日' && imputeDays.length) cls = ' num-danger';
       grid.appendChild(h('div', { class: 'summary-cell' }, [
         h('div', { class: 'k', text: p[0] }),
         h('div', { class: 'v' + cls, text: p[1] })
       ]));
     });
-    return grid;
+    var box = h('div', {}, grid);
+    if (imputeDays.length) {
+      box.appendChild(h('div', { class: 'impute-warning' }, [
+        h('b', { text: '补录超限，以下日期不计入月均与总量：' }),
+        imputeDays.map(function (d) { return d.day + '（补录 ' + d.imputedHours + ' 小时，上限 ' + d.imputeLimit + ' 小时，超 ' + d.overBy + ' 小时）'; }).join('；')
+      ]));
+    }
+    return box;
   }
 
   function hourlyTable(rows) {
     var tb = h('tbody');
     (rows || []).forEach(function (r) {
-      tb.appendChild(h('tr', { class: 'row' }, [
+      tb.appendChild(h('tr', { class: 'row' + (r.source === '补录' ? ' row-imputed' : '') }, [
         h('td', { class: 'nowrap', text: r.at }),
         h('td', { class: 'mono', text: textOf(r.hour) }),
         h('td', { class: 'mono', text: textOf(r.value) }),
-        h('td', { text: r.source }),
+        h('td', {}, sourceTag(r.source)),
         h('td', {}, h('span', { class: 'tag ' + (r.flag === '有效' ? 'tag-ok' : 'tag-danger'), text: r.flag })),
         h('td', { text: textOf(r.deviceCode) }),
         h('td', {}, statusTag(r.deviceStatus, '正常')),
@@ -945,18 +958,28 @@
     ]);
   }
 
+  function sourceTag(source) {
+    return h('span', { class: 'tag ' + (source === '补录' ? 'tag-warn' : 'tag-ok'), text: source });
+  }
+
   function dailyRow(d, metric) {
+    var valid = d.valid !== false;
     return expandableRow([
       h('td', { class: 'nowrap', text: d.day }),
       h('td', { class: 'mono', text: textOf(d.countedHours) }),
-      h('td', { class: 'mono', text: textOf(d.imputedHours) }),
+      h('td', { class: 'mono' + (Number(d.imputedHours) > 0 ? ' num-warn' : ''), text: textOf(d.imputedHours) }),
       h('td', { class: 'mono', text: fmt(d.average) }),
       h('td', { class: 'mono', text: textOf(d.limit) }),
-      h('td', {}, h('span', { class: 'tag ' + (d.exceed ? 'tag-danger' : 'tag-ok'), text: d.exceed ? '超标' : '达标' })),
-      h('td', { class: 'mono', text: fmt(d.flowTotal, 1) })
+      h('td', {}, valid
+        ? h('span', { class: 'tag ' + (d.exceed ? 'tag-danger' : 'tag-ok'), text: d.exceed ? '超标' : '达标' })
+        : '—'),
+      h('td', { class: 'mono', text: fmt(d.flowTotal, 1) }),
+      h('td', {}, h('span', { class: 'tag ' + (valid ? 'tag-ok' : 'tag-danger'), text: valid ? '有效' : '无效' })),
+      h('td', { class: 'reason-cell', text: valid ? '—' : textOf(d.invalidReason) })
     ], function () {
       var wrap = h('div');
-      wrap.appendChild(h('div', { class: 'section-note', text: d.day + ' · ' + metric + ' 逐小时明细（共 ' + ((d.rows || []).length) + ' 小时）' }));
+      wrap.appendChild(h('div', { class: 'section-note', text: d.day + ' · ' + metric + ' 逐小时明细（共 ' + ((d.rows || []).length) + ' 小时，其中补录 ' + (d.imputedCount == null ? d.imputedHours : d.imputedCount) + ' 条）' }));
+      if (!valid) wrap.appendChild(h('div', { class: 'section-note invalid-note', text: '不计入原因：' + textOf(d.invalidReason) }));
       wrap.appendChild(h('div', { class: 'table-wrap' }, hourlyTable(d.rows)));
       return wrap;
     });
@@ -1009,18 +1032,24 @@
           if (!series.length) { holder.appendChild(h('div', { class: 'empty', text: '本月没有 ' + m + ' 数据' })); return; }
           var tb = h('tbody');
           series.forEach(function (d) {
+            var valid = d.valid !== false;
             tb.appendChild(h('tr', { class: 'row' }, [
               h('td', { class: 'nowrap', text: d.day }), h('td', { class: 'mono', text: textOf(d.countedHours) }),
-              h('td', { class: 'mono', text: textOf(d.imputedHours) }), h('td', { class: 'mono', text: fmt(d.average) }),
+              h('td', { class: 'mono' + (Number(d.imputedHours) > 0 ? ' num-warn' : ''), text: textOf(d.imputedHours) }), h('td', { class: 'mono', text: fmt(d.average) }),
               h('td', { class: 'mono', text: textOf(d.limit) }),
-              h('td', {}, h('span', { class: 'tag ' + (d.exceed ? 'tag-danger' : 'tag-ok'), text: d.exceed ? '超标' : '达标' })),
-              h('td', { class: 'mono', text: fmt(d.flowTotal, 1) })
+              h('td', {}, valid
+                ? h('span', { class: 'tag ' + (d.exceed ? 'tag-danger' : 'tag-ok'), text: d.exceed ? '超标' : '达标' })
+                : '—'),
+              h('td', { class: 'mono', text: fmt(d.flowTotal, 1) }),
+              h('td', {}, h('span', { class: 'tag ' + (valid ? 'tag-ok' : 'tag-danger'), text: valid ? '有效' : '无效' })),
+              h('td', { class: 'reason-cell', text: valid ? '—' : textOf(d.invalidReason) })
             ]));
           });
           holder.appendChild(h('div', { class: 'table-wrap' }, h('table', { class: 'mini-table' }, [
             h('thead', {}, h('tr', {}, [
               h('th', { text: '日期' }), h('th', { text: '有效小时数' }), h('th', { text: '补录小时数' }),
-              h('th', { text: '日均' }), h('th', { text: '限值' }), h('th', { text: '是否超标' }), h('th', { text: '当日流量合计' })
+              h('th', { text: '日均' }), h('th', { text: '限值' }), h('th', { text: '是否超标' }), h('th', { text: '当日流量合计' }),
+              h('th', { text: '判定' }), h('th', { text: '不计入原因' })
             ])),
             tb
           ])));
@@ -1145,7 +1174,8 @@
       h('div', { class: 'table-wrap' }, h('table', { id: 'tableDaily' }, [
         h('thead', {}, h('tr', {}, [
           h('th', { text: '日期' }), h('th', { text: '有效小时数' }), h('th', { text: '补录小时数' }), h('th', { text: '日均' }),
-          h('th', { text: '限值' }), h('th', { text: '是否超标' }), h('th', { text: '当日流量合计' })
+          h('th', { text: '限值' }), h('th', { text: '是否超标' }), h('th', { text: '当日流量合计' }),
+          h('th', { text: '判定' }), h('th', { text: '不计入原因' })
         ])),
         dailyTb
       ]))

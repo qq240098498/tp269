@@ -73,29 +73,43 @@ function dayRows(data, outletId, metric, day) {
   });
 }
 
-// 日均：按小时流量加权；有效小时不足 18 小时该日无效；补算小时不超过上限
+// 日均：按小时流量加权；有效小时不足 18 小时该日无效；补录小时超过上限（maxImputeHoursPerDay）该日整体不计入平均与总量
 function dailyStats(data, outletId, metric, day) {
   const settings = data.settings;
   const rows = dayRows(data, outletId, metric, day);
   const counted = rows.filter((r) => r.counted);
   const limit = metric === '氨氮' ? Number(settings.ammoniaDailyLimit) : Number(settings.codDailyLimit);
+  const imputedHours = counted.filter((r) => r.source === '补录').length;
+  const imputedCount = rows.filter((r) => r.source === '补录').length;
+  const imputeLimit = Number(settings.maxImputeHoursPerDay);
   if (!counted.length) {
-    return { day, outletId, metric, rows, countedHours: 0, imputedHours: 0, average: 0, valid: false, limit, exceed: false, flowTotal: 0 };
+    return {
+      day, outletId, metric, rows, countedHours: 0, imputedHours, imputedCount, imputeLimit,
+      average: 0, valid: false, invalidReason: '无有效小时值', limit, exceed: false, flowTotal: 0,
+    };
   }
   const sum = counted.reduce((acc, r) => acc + r.concentration, 0);
   const average = store.round(sum / counted.length, 2);
   const flowTotal = counted.reduce((acc, r) => acc + r.flow, 0);
+  // 口径：单日补录小时超过上限，该日按无效处理，不计入平均与总量，也不参与超标判定
+  const overLimit = imputedHours > imputeLimit;
+  const invalidReason = overLimit
+    ? '补录 ' + imputedHours + ' 小时，超过单日补录上限 ' + imputeLimit + ' 小时（超 ' + (imputedHours - imputeLimit) + ' 小时），该日不计入月均与总量'
+    : '';
   return {
     day,
     outletId,
     metric,
     rows,
     countedHours: counted.length,
-    imputedHours: counted.filter((r) => r.source === '补录').length,
+    imputedHours,
+    imputedCount,
+    imputeLimit,
     average,
-    valid: true,
+    valid: !overLimit,
+    invalidReason,
     limit,
-    exceed: average > limit,
+    exceed: !overLimit && average > limit,
     flowTotal: store.round(flowTotal, 1),
   };
 }
@@ -111,24 +125,24 @@ function dailySeries(data, outletId, metric, month) {
   return out;
 }
 
-// 月均值：按有数据的天平均
+// 月均值：按有数据且有效的天数平均（分母是有效天数，不是当月天数）；补录超限日不计入
 function monthAverage(data, outletId, metric, month) {
   const series = dailySeries(data, outletId, metric, month).filter((s) => s.valid);
-  const days = store.daysInMonth(month);
   if (!series.length) return 0;
   const sum = series.reduce((acc, s) => acc + s.average, 0);
-  return store.round(sum / days, 2);
+  return store.round(sum / series.length, 2);
 }
 
-// 月总量（吨）：逐小时浓度乘以流量相加
+// 月总量（吨）：只对有效日逐小时累加，浓度与流量取同一时刻的那一对；补录超限日不计入
 function monthTotal(data, outletId, metric, month) {
   const settings = data.settings;
-  const concRows = readingsOf(data, { outletId, metric, month }).filter((r) => isCounted(r, deviceOf(data, r.deviceId), settings));
-  const flowRows = readingsOf(data, { outletId, metric: '流量', month }).filter((r) => isCounted(r, deviceOf(data, r.deviceId), settings));
   let mg = 0;
-  for (let i = 0; i < concRows.length; i += 1) {
-    const flow = flowRows[i] ? Number(flowRows[i].value) : 0;
-    mg += effectiveConcentration(concRows[i], settings) * flow;
+  for (const s of dailySeries(data, outletId, metric, month)) {
+    if (!s.valid) continue;
+    for (const row of s.rows) {
+      if (!row.counted) continue;
+      mg += row.concentration * row.flow;
+    }
   }
   return store.round(mg / Number(settings.tonsDivisor), 4);
 }
@@ -166,9 +180,10 @@ function exceedance(data, outletId, metric, month) {
   const settings = data.settings;
   const series = dailySeries(data, outletId, metric, month);
   const limit = metric === '氨氮' ? Number(settings.ammoniaDailyLimit) : Number(settings.codDailyLimit);
-  const exceedDays = series.filter((s) => s.exceed).map((s) => s.day);
+  const exceedDays = series.filter((s) => s.valid && s.exceed).map((s) => s.day);
   let exceedHours = 0;
   for (const s of series) {
+    if (!s.valid) continue; // 无效日（含补录超限日）不参与超标判定
     for (const row of s.rows) if (row.counted && row.concentration > limit) exceedHours += 1;
   }
   const hourly = exceedHours >= Number(settings.hourlyExceedCountLimit);
@@ -197,10 +212,19 @@ function outletSummary(data, outletId, month) {
   const metrics = ['COD', '氨氮'];
   const rows = metrics.map((metric) => {
     const ex = exceedance(data, outletId, metric, month);
+    const series = dailySeries(data, outletId, metric, month);
     return {
       metric,
       monthAverage: ex.monthAverage,
       monthTotalTons: monthTotal(data, outletId, metric, month),
+      validDayCount: series.filter((s) => s.valid).length,
+      imputeExceededDays: series.filter((s) => !s.valid && s.imputedHours > s.imputeLimit).map((s) => ({
+        day: s.day,
+        imputedHours: s.imputedHours,
+        imputeLimit: s.imputeLimit,
+        overBy: s.imputedHours - s.imputeLimit,
+        reason: s.invalidReason,
+      })),
       exceedDaysCount: ex.exceedDaysCount,
       exceedHours: ex.exceedHours,
       exceeded: ex.exceeded,
