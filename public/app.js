@@ -289,6 +289,10 @@
     var cls = status === okValue ? 'tag-ok' : (status === '退回' || status === '停产' || status === '停用' || status === '故障' ? 'tag-danger' : 'tag-warn');
     return h('span', { class: 'tag ' + cls, text: status });
   }
+  /* 来源标签：补录与自动要一眼区分开 */
+  function sourceTag(source) {
+    return h('span', { class: 'tag ' + (source === '补录' ? 'tag-impute' : 'tag-auto'), text: source });
+  }
 
   /* ================= 数据加载 ================= */
   async function loadAll() {
@@ -748,14 +752,14 @@
         return api('DELETE', '/api/readings/' + r.id).then(function () { return afterMutation('已删除监测数据 ' + r.id); });
       })
     ]);
-    return expandableRow([
+    var tr = expandableRow([
       h('td', { text: textOf(r.outletCode) }),
       h('td', { text: textOf(r.deviceCode) }),
       h('td', { text: r.metric }),
       h('td', { class: 'nowrap', text: r.at }),
       h('td', { class: 'mono', text: textOf(r.value) }),
       h('td', {}, h('span', { class: 'tag ' + (r.flag === '有效' ? 'tag-ok' : 'tag-danger'), text: r.flag })),
-      h('td', { text: r.source }),
+      h('td', {}, sourceTag(r.source)),
       h('td', { text: textOf(r.operator) }),
       h('td', {}, h('span', { class: 'tag ' + (r.counted ? 'tag-ok' : 'tag-danger'), text: r.counted ? '计入' : '不计入' })),
       h('td', { class: 'mono cell-page-conc', dataset: { value: pc === null ? '' : String(pc) }, text: pc === null ? '—' : fmt(pc, 2) }),
@@ -770,6 +774,8 @@
         h('div', { class: 'detail-block' }, [h('h3', { text: '备注' }), h('div', { text: textOf(r.remark) })])
       ]);
     });
+    if (r.source === '补录') tr.classList.add('row-imputed');
+    return tr;
   }
 
   async function renderReadings() {
@@ -895,6 +901,7 @@
     var cells = [
       ['月均', fmt(row.monthAverage)],
       ['月总量(吨)', fmt(row.monthTotalTons, 4)],
+      ['有效天数', textOf(row.validDayCount) + (Number(row.invalidDayCount) > 0 ? '（无效 ' + row.invalidDayCount + ' 天不计入）' : '')],
       ['季度总量 COD(吨)', fmt(sum.quarterTotalCod, 4)],
       ['季度许可量 COD(吨)', fmt(sum.permitCodTons, 4)],
       ['年累计 COD(吨)', fmt(sum.accumulatedCodTons, 4)],
@@ -921,11 +928,11 @@
   function hourlyTable(rows) {
     var tb = h('tbody');
     (rows || []).forEach(function (r) {
-      tb.appendChild(h('tr', { class: 'row' }, [
+      tb.appendChild(h('tr', { class: 'row' + (r.source === '补录' ? ' row-imputed' : '') }, [
         h('td', { class: 'nowrap', text: r.at }),
         h('td', { class: 'mono', text: textOf(r.hour) }),
         h('td', { class: 'mono', text: textOf(r.value) }),
-        h('td', { text: r.source }),
+        h('td', {}, sourceTag(r.source)),
         h('td', {}, h('span', { class: 'tag ' + (r.flag === '有效' ? 'tag-ok' : 'tag-danger'), text: r.flag })),
         h('td', { text: textOf(r.deviceCode) }),
         h('td', {}, statusTag(r.deviceStatus, '正常')),
@@ -945,21 +952,37 @@
     ]);
   }
 
-  function dailyRow(d, metric) {
-    return expandableRow([
+  /* 逐日明细的单元格：判定为无效的日要写明原因（补录几小时、超了多少；或有效小时不足） */
+  var DAILY_HEADERS = ['日期', '有效小时数', '补录小时数', '日均', '限值', '判定', '无效原因', '是否超标', '当日流量合计'];
+  function dailyHeadRow() {
+    return h('tr', {}, DAILY_HEADERS.map(function (t) { return h('th', { text: t }); }));
+  }
+  function dailyCells(d) {
+    var overImpute = Number(d.imputedHours) > Number(d.maxImputeHoursPerDay);
+    return [
       h('td', { class: 'nowrap', text: d.day }),
       h('td', { class: 'mono', text: textOf(d.countedHours) }),
-      h('td', { class: 'mono', text: textOf(d.imputedHours) }),
+      h('td', { class: 'mono' + (overImpute ? ' num-danger' : ''), text: textOf(d.imputedHours) }),
       h('td', { class: 'mono', text: fmt(d.average) }),
       h('td', { class: 'mono', text: textOf(d.limit) }),
-      h('td', {}, h('span', { class: 'tag ' + (d.exceed ? 'tag-danger' : 'tag-ok'), text: d.exceed ? '超标' : '达标' })),
+      h('td', {}, h('span', { class: 'tag ' + (d.valid ? 'tag-ok' : 'tag-danger'), text: d.valid ? '有效' : '无效' })),
+      h('td', { class: 'reason-cell', text: d.valid ? '—' : (d.reason || (d.invalidReasons || []).join('；')) }),
+      h('td', {}, d.valid
+        ? h('span', { class: 'tag ' + (d.exceed ? 'tag-danger' : 'tag-ok'), text: d.exceed ? '超标' : '达标' })
+        : h('span', { text: '—' })),
       h('td', { class: 'mono', text: fmt(d.flowTotal, 1) })
-    ], function () {
+    ];
+  }
+
+  function dailyRow(d, metric) {
+    var tr = expandableRow(dailyCells(d), function () {
       var wrap = h('div');
       wrap.appendChild(h('div', { class: 'section-note', text: d.day + ' · ' + metric + ' 逐小时明细（共 ' + ((d.rows || []).length) + ' 小时）' }));
       wrap.appendChild(h('div', { class: 'table-wrap' }, hourlyTable(d.rows)));
       return wrap;
     });
+    if (!d.valid) tr.classList.add('row-invalid');
+    return tr;
   }
 
   async function reportDetailNode(id) {
@@ -1009,19 +1032,11 @@
           if (!series.length) { holder.appendChild(h('div', { class: 'empty', text: '本月没有 ' + m + ' 数据' })); return; }
           var tb = h('tbody');
           series.forEach(function (d) {
-            tb.appendChild(h('tr', { class: 'row' }, [
-              h('td', { class: 'nowrap', text: d.day }), h('td', { class: 'mono', text: textOf(d.countedHours) }),
-              h('td', { class: 'mono', text: textOf(d.imputedHours) }), h('td', { class: 'mono', text: fmt(d.average) }),
-              h('td', { class: 'mono', text: textOf(d.limit) }),
-              h('td', {}, h('span', { class: 'tag ' + (d.exceed ? 'tag-danger' : 'tag-ok'), text: d.exceed ? '超标' : '达标' })),
-              h('td', { class: 'mono', text: fmt(d.flowTotal, 1) })
-            ]));
+            var tr = h('tr', { class: 'row' + (d.valid ? '' : ' row-invalid') }, dailyCells(d));
+            tb.appendChild(tr);
           });
           holder.appendChild(h('div', { class: 'table-wrap' }, h('table', { class: 'mini-table' }, [
-            h('thead', {}, h('tr', {}, [
-              h('th', { text: '日期' }), h('th', { text: '有效小时数' }), h('th', { text: '补录小时数' }),
-              h('th', { text: '日均' }), h('th', { text: '限值' }), h('th', { text: '是否超标' }), h('th', { text: '当日流量合计' })
-            ])),
+            h('thead', {}, dailyHeadRow()),
             tb
           ])));
         });
@@ -1142,12 +1157,47 @@
         h('h2', { text: metric + ' 逐日明细' }),
         h('span', { class: 'sub', text: '共 ' + series.length + ' 天（点某天展开逐小时明细）' })
       ]),
-      h('div', { class: 'table-wrap' }, h('table', { id: 'tableDaily' }, [
+      h('div', { class: 'card-body' }, [
+        h('div', { class: 'section-note' }, [
+          '口径：单日有效小时不足 ', h('b', { text: String(daily.minHoursPerDay || 18) }), ' 小时，或补录小时超过单日上限 ',
+          h('b', { text: String(daily.maxImputeHoursPerDay) }), ' 小时（设置里可改）的，该日整体不计入月均与总量；无效日已标红并写明原因。'
+        ]),
+        h('div', { class: 'table-wrap' }, h('table', { id: 'tableDaily' }, [
+          h('thead', {}, dailyHeadRow()),
+          dailyTb
+        ]))
+      ])
+    ]));
+
+    /* 每日补录统计：每一天的补录条数（分指标），补录行与自动数据区分显示 */
+    var imp = daily.imputationByDay || [];
+    var impTb = h('tbody');
+    imp.forEach(function (row) {
+      var parts = Object.keys(row.byMetric || {}).map(function (k) { return k + ' ' + row.byMetric[k] + ' 条'; });
+      var over = Object.keys(row.byMetric || {}).some(function (k) { return row.byMetric[k] > Number(daily.maxImputeHoursPerDay); });
+      impTb.appendChild(h('tr', { class: 'row' + (row.imputedCount > 0 ? ' row-imputed' : '') }, [
+        h('td', { class: 'nowrap', text: row.day }),
+        h('td', { class: 'mono' + (over ? ' num-danger' : ''), text: String(row.imputedCount) }),
+        h('td', { class: 'mono', text: String(row.autoCount) }),
+        h('td', { text: parts.join('、') || '—' }),
+        h('td', {}, row.imputedCount === 0
+          ? h('span', { class: 'tag tag-auto', text: '无补录' })
+          : (over
+            ? h('span', { class: 'tag tag-danger', text: '补录超限，该日不计入' })
+            : h('span', { class: 'tag tag-impute', text: '有补录，未超上限' })))
+      ]));
+    });
+    c.appendChild(h('div', { class: 'card' }, [
+      h('div', { class: 'card-head' }, [
+        h('h2', { text: '每日补录统计' }),
+        h('span', { class: 'sub', text: month + ' · 补录与自动条数按天分列，上限 ' + String(daily.maxImputeHoursPerDay) + ' 小时/日' })
+      ]),
+      h('div', { class: 'table-wrap' }, h('table', { id: 'tableImputation' }, [
         h('thead', {}, h('tr', {}, [
-          h('th', { text: '日期' }), h('th', { text: '有效小时数' }), h('th', { text: '补录小时数' }), h('th', { text: '日均' }),
-          h('th', { text: '限值' }), h('th', { text: '是否超标' }), h('th', { text: '当日流量合计' })
+          h('th', { text: '日期' }), h('th', { text: '补录条数' }), h('th', { text: '自动条数' }),
+          h('th', { text: '分指标补录' }), h('th', { text: '判定' })
         ])),
-        dailyTb
+        impTb
       ]))
     ]));
 

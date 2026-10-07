@@ -1,6 +1,9 @@
 // 监测数据口径都集中在这里：有效读数、折算、日均、总量、超标、许可
 const store = require('./store');
 
+// 口径常量：单日计入小时不足 18 小时的，该日不计入平均与总量
+const MIN_VALID_HOURS_PER_DAY = 18;
+
 function plantOf(data, id) {
   return data.plants.find((p) => p.id === id) || null;
 }
@@ -73,31 +76,56 @@ function dayRows(data, outletId, metric, day) {
   });
 }
 
+// 日有效性闸门：计入小时不足 18 小时，或补录小时超过单日上限（设置 maxImputeHoursPerDay），
+// 该日整体不计入月均与总量；返回不能计入的原因列表（页面要写明补录了几小时、超了多少）
+function dayGate(countedHours, imputedHours, settings) {
+  const maxImpute = Number(settings.maxImputeHoursPerDay);
+  const reasons = [];
+  if (countedHours < MIN_VALID_HOURS_PER_DAY) {
+    reasons.push('有效小时 ' + countedHours + ' 不足 ' + MIN_VALID_HOURS_PER_DAY + ' 小时');
+  }
+  if (imputedHours > maxImpute) {
+    reasons.push('补录 ' + imputedHours + ' 小时，超过单日补录上限 ' + maxImpute + ' 小时（超 ' + (imputedHours - maxImpute) + ' 小时）');
+  }
+  return { valid: reasons.length === 0, reasons };
+}
+
 // 日均：按小时流量加权；有效小时不足 18 小时该日无效；补算小时不超过上限
 function dailyStats(data, outletId, metric, day) {
   const settings = data.settings;
   const rows = dayRows(data, outletId, metric, day);
   const counted = rows.filter((r) => r.counted);
   const limit = metric === '氨氮' ? Number(settings.ammoniaDailyLimit) : Number(settings.codDailyLimit);
-  if (!counted.length) {
-    return { day, outletId, metric, rows, countedHours: 0, imputedHours: 0, average: 0, valid: false, limit, exceed: false, flowTotal: 0 };
-  }
-  const sum = counted.reduce((acc, r) => acc + r.concentration, 0);
-  const average = store.round(sum / counted.length, 2);
-  const flowTotal = counted.reduce((acc, r) => acc + r.flow, 0);
-  return {
+  const imputedHours = counted.filter((r) => r.source === '补录').length;
+  const base = {
     day,
     outletId,
     metric,
     rows,
     countedHours: counted.length,
-    imputedHours: counted.filter((r) => r.source === '补录').length,
-    average,
-    valid: true,
+    imputedHours,
     limit,
-    exceed: average > limit,
-    flowTotal: store.round(flowTotal, 1),
+    minHoursPerDay: MIN_VALID_HOURS_PER_DAY,
+    maxImputeHoursPerDay: Number(settings.maxImputeHoursPerDay),
   };
+  if (!counted.length) {
+    return Object.assign(base, {
+      average: 0, valid: false, invalidReasons: ['没有计入的小时值'], reason: '没有计入的小时值',
+      exceed: false, flowTotal: 0,
+    });
+  }
+  const gate = dayGate(counted.length, imputedHours, settings);
+  const sum = counted.reduce((acc, r) => acc + r.concentration, 0);
+  const average = store.round(sum / counted.length, 2);
+  const flowTotal = counted.reduce((acc, r) => acc + r.flow, 0);
+  return Object.assign(base, {
+    average,
+    valid: gate.valid,
+    invalidReasons: gate.reasons,
+    reason: gate.reasons.join('；'),
+    exceed: gate.valid && average > limit,
+    flowTotal: store.round(flowTotal, 1),
+  });
 }
 
 function dailySeries(data, outletId, metric, month) {
@@ -111,26 +139,67 @@ function dailySeries(data, outletId, metric, month) {
   return out;
 }
 
-// 月均值：按有数据的天平均
-function monthAverage(data, outletId, metric, month) {
-  const series = dailySeries(data, outletId, metric, month).filter((s) => s.valid);
+// 每日补录条数统计：该排放口当月每一天（有数据的天）的补录记录数，含分指标明细
+function imputationByDay(data, outletId, month) {
   const days = store.daysInMonth(month);
-  if (!series.length) return 0;
-  const sum = series.reduce((acc, s) => acc + s.average, 0);
-  return store.round(sum / days, 2);
+  const out = [];
+  for (let d = 1; d <= days; d += 1) {
+    const day = month + '-' + String(d).padStart(2, '0');
+    const rows = readingsOf(data, { outletId, day });
+    if (!rows.length) continue;
+    const byMetric = {};
+    let imputedCount = 0;
+    for (const r of rows) {
+      if (r.source !== '补录') continue;
+      byMetric[r.metric] = (byMetric[r.metric] || 0) + 1;
+      imputedCount += 1;
+    }
+    out.push({ day, imputedCount, byMetric });
+  }
+  return out;
 }
 
-// 月总量（吨）：逐小时浓度乘以流量相加
+// 月均值：按有效天的日均平均，分母是有效天数（无效日既不进分子也不进分母）
+function monthAverage(data, outletId, metric, month) {
+  const series = dailySeries(data, outletId, metric, month).filter((s) => s.valid);
+  if (!series.length) return 0;
+  const sum = series.reduce((acc, s) => acc + s.average, 0);
+  return store.round(sum / series.length, 2);
+}
+
+// 月总量（吨）：只对有效日逐小时累加，浓度与流量取同一时刻的那一对；无效日整体不进总量
 function monthTotal(data, outletId, metric, month) {
   const settings = data.settings;
-  const concRows = readingsOf(data, { outletId, metric, month }).filter((r) => isCounted(r, deviceOf(data, r.deviceId), settings));
-  const flowRows = readingsOf(data, { outletId, metric: '流量', month }).filter((r) => isCounted(r, deviceOf(data, r.deviceId), settings));
   let mg = 0;
-  for (let i = 0; i < concRows.length; i += 1) {
-    const flow = flowRows[i] ? Number(flowRows[i].value) : 0;
-    mg += effectiveConcentration(concRows[i], settings) * flow;
+  const series = dailySeries(data, outletId, metric, month);
+  for (const s of series) {
+    if (!s.valid) continue;
+    for (const row of s.rows) {
+      if (!row.counted) continue;
+      mg += row.concentration * row.flow;
+    }
   }
   return store.round(mg / Number(settings.tonsDivisor), 4);
+}
+
+// 每日补录条数统计：该排放口当月每一天的补录记录数（含分指标明细），用于页面把补录与自动区分展示
+function imputationByDay(data, outletId, month) {
+  const days = store.daysInMonth(month);
+  const out = [];
+  for (let d = 1; d <= days; d += 1) {
+    const day = month + '-' + String(d).padStart(2, '0');
+    const rows = readingsOf(data, { outletId, day });
+    if (!rows.length) continue;
+    const byMetric = {};
+    let imputedCount = 0;
+    for (const r of rows) {
+      if (r.source !== '补录') continue;
+      byMetric[r.metric] = (byMetric[r.metric] || 0) + 1;
+      imputedCount += 1;
+    }
+    out.push({ day, imputedCount, autoCount: rows.length - imputedCount, byMetric });
+  }
+  return out;
 }
 
 // 季度总量：按当季日均乘以季节天数
@@ -197,10 +266,15 @@ function outletSummary(data, outletId, month) {
   const metrics = ['COD', '氨氮'];
   const rows = metrics.map((metric) => {
     const ex = exceedance(data, outletId, metric, month);
+    const series = dailySeries(data, outletId, metric, month);
+    const invalidDays = series.filter((s) => !s.valid).map((s) => ({ day: s.day, reason: s.reason }));
     return {
       metric,
       monthAverage: ex.monthAverage,
       monthTotalTons: monthTotal(data, outletId, metric, month),
+      validDayCount: series.length - invalidDays.length,
+      invalidDayCount: invalidDays.length,
+      invalidDays,
       exceedDaysCount: ex.exceedDaysCount,
       exceedHours: ex.exceedHours,
       exceeded: ex.exceeded,
@@ -229,5 +303,6 @@ module.exports = {
   plantOf, outletOf, deviceOf,
   readingsOf, isCounted, effectiveConcentration, oxygenAt, flowAt,
   dayRows, dailyStats, dailySeries, monthAverage, monthTotal, quarterTotal, quarterPermitTons, accumulatedTons,
-  exceedance, outletsOf, outletSummary,
+  exceedance, outletsOf, outletSummary, dayGate, imputationByDay,
+  MIN_VALID_HOURS_PER_DAY,
 };

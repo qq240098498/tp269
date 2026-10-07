@@ -297,6 +297,16 @@ tr.expand-row > td {
 .num-danger { color: var(--danger); font-weight: 600; }
 .num-warn { color: var(--accent); }
 
+/* 补录与自动区分：补录用赭石橙标签与浅橙行底色，自动用灰绿 */
+.tag-impute { background: var(--accent-soft); border-color: #f0d3b1; color: var(--accent); font-weight: 600; }
+.tag-auto { background: var(--card-alt); border-color: var(--line); color: var(--ink-2); }
+tbody tr.row-imputed > td { background: #fbf3e7; }
+tbody tr.row-imputed:hover > td { background: var(--accent-soft); }
+/* 判定无效的日：整行浅红，原因列允许换行 */
+tbody tr.row-invalid > td { background: var(--danger-soft); }
+tbody tr.row-invalid:hover > td { background: #f2d8d4; }
+.reason-cell { white-space: normal; min-width: 200px; color: var(--danger); }
+
 /* ---------- 弹层 ---------- */
 .modal-mask {
   display: flex;

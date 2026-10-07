@@ -106,7 +106,14 @@ router.get('/outlets/:id/daily', withData((data, req) => {
   const metrics = req.query.metric ? [req.query.metric] : ['COD', '氨氮'];
   const out = {};
   for (const metric of metrics) out[metric] = monitor.dailySeries(data, req.params.id, metric, month);
-  return { outletId: req.params.id, month, metrics: out };
+  return {
+    outletId: req.params.id,
+    month,
+    metrics: out,
+    maxImputeHoursPerDay: Number(data.settings.maxImputeHoursPerDay),
+    minHoursPerDay: monitor.MIN_VALID_HOURS_PER_DAY,
+    imputationByDay: monitor.imputationByDay(data, req.params.id, month),
+  };
 }));
 router.get('/outlets/:id/exceedance', withData((data, req) => {
   const month = req.query.month || currentMonth(data);
